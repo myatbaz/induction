@@ -1,3 +1,5 @@
+#ifndef __data_h_M_
+#define __data_h_M_
 #include <iostream>
 #include <fstream>
 #include <stdexcept>
@@ -22,3 +24,4 @@ private:
      //     std::vector<std::vector<int> > instanceVector;
 
 };
+#endif
