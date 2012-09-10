@@ -1,4 +1,5 @@
 #include <iostream>
+#include <cstdlib> 
 #include <fstream>
 #include <stdexcept>
 #include <sstream>
@@ -15,26 +16,42 @@
 #include "cluster.h"
 typedef boost::unordered_map<std::string, int> maps2i;
 #define isexsist(h,v) h.find(v) != h.end()
+#define LOGZERO 0
 class learn{
 public:
      learn();
-     learn(std::vector<std::string> r);
+     learn(std::vector<std::string> r, int cc);
+     void set_cluster(int cc){numberClusters = cc;};
      void preprocess_data();
      void assign_id(maps2i& m);
      void counts();
      void info();
+     double cluster_prior(cluster &c) const;
+     double cluster_posterior(type &t, cluster &c) const;
+     double log_cluster_prior(cluster &c) const;
+     double log_cluster_posterior(type &t, cluster &c) const;
+     void random_init();
+     void sample_type();
+     double log_sum(double a, double b)const {return a+b;}
+          //                   if (a == LOGZERO) return b;
+          //          else if(b == LOGZERO) return a;
+          //         else return a > b ? a + log(1 + std::exp (b - a)) : b + log(1 + std::exp(a - b)); };
+     int multi(std::vector<double>& probs) const;
 private:
      int threshold;
      int numberClusters;
+     double hyperBeta;
+     double hyperAlpha;
      std::vector<std::string> rows;
      maps2i typeMap;
      std::vector<maps2i> typeHash;
      std::vector<type> typeObjects;
      std::vector<cluster> clusters;
+     
 };
 
-learn::learn():threshold(100),numberClusters(45){clusters.resize(numberClusters);}
-learn::learn(std::vector<std::string> r):threshold(100),numberClusters(45){rows = r; clusters.resize(numberClusters);};
+learn::learn():threshold(100),numberClusters(45),hyperAlpha(1),hyperBeta(1){clusters.resize(numberClusters);srand(1);}
+learn::learn(std::vector<std::string> r, int cluster):threshold(100),numberClusters(cluster),hyperAlpha(0.05),hyperBeta(1){rows = r; clusters.resize(numberClusters);srand(1);};
 void learn::preprocess_data(){
      if (rows.empty()) {std::cerr << "No row data" << std::endl; return;}
      for(int i = 0 ; i < rows.size(); i++){
@@ -109,12 +126,117 @@ void learn::counts(){
      }
 }
 
+double learn::cluster_prior(cluster &c) const{
+     return (c.get_typec() + hyperAlpha) / (c.totalTypesInClusters + c.totalCluster * hyperAlpha);
+}
+
+double learn::cluster_posterior(type &t, cluster &c) const{
+     std::vector<std::vector<int> > typeCounts = t.get_counts();
+     std::vector<std::vector<int> > counts = c.get_counts();
+     std::vector<int> allCounts = c.get_featureTotalCounts();
+     double post = 1;
+     for(int i = 1 ; i < typeCounts.size() ; i++){
+          double postNum = 1, postDen = 1;
+          int allTypeCounts = 0;//better design should be made
+          for(int j = 0 ; j < typeCounts[i].size(); j++){
+               allTypeCounts += typeCounts[i][j];
+               for(int k = 0 ; k < typeCounts[i][j] - 1; k++){
+                    postNum *= (counts[i][j] + k + hyperBeta);
+               }
+          }
+          for(int k = 0 ; k < allTypeCounts - 1; k++)
+               postDen *= (allCounts[i] + k + typeHash[i].size() * hyperBeta); //ad          
+          post *= postNum / postDen;
+          //          std::cout << i << "typeHash" << typeHash[i].size() <<" Num" << postNum << "Den" << postDen << " post" << post << std::endl;
+     }          
+     return post;
+}
+
+double learn::log_cluster_prior(cluster &c) const{
+     return log(c.get_typec() + hyperAlpha) - log(c.totalTypesInClusters + c.totalCluster * hyperAlpha);
+}
+
+double learn::log_cluster_posterior(type &t, cluster &c) const{
+     std::vector<std::vector<int> > typeCounts = t.get_counts();
+     std::vector<std::vector<int> > counts = c.get_counts();
+     std::vector<int> allCounts = c.get_featureTotalCounts();
+     double post = LOGZERO;
+     for(int i = 1 ; i < typeCounts.size() ; i++){
+          double postNum = LOGZERO, postDen = LOGZERO;
+          int allTypeCounts = 0;//better design should be made
+          for(int j = 0 ; j < typeCounts[i].size(); j++){
+               allTypeCounts += typeCounts[i][j];
+               for(int k = 0 ; k < typeCounts[i][j] - 1; k++){
+                    postNum = log_sum(postNum, log(counts[i][j] + k + hyperBeta));
+               }
+          }
+          for(int k = 0 ; k < allTypeCounts - 1; k++)
+               postDen = log_sum(postDen,  log(allCounts[i] + k + typeHash[i].size() * hyperBeta)); //add only once 
+          //std::cout << "postNum:" << std::exp(postNum) << " postDen:" << std::exp(postDen) << std:endl;          
+          double diff = log_sum(postNum, -postDen);
+          post = log_sum(post, diff);
+                    std::cout << i << "typeHash" << typeHash[i].size() <<" Num" << postNum << "Den" << postDen << " post" << post << std::endl;
+     }
+     return post;
+}
+
+void learn::random_init(){
+     for(std::vector<type>::iterator iter = typeObjects.begin(); iter != typeObjects.end() ; iter++){
+          int cid = rand() % numberClusters;
+          clusters[cid].add_type(*iter);
+     }     
+}
+
+void learn::sample_type(){
+     std::vector<double> probs(clusters.size(),0);
+     for(int it = 0 ; it < 2000 ;it++){
+          std::cout << "iter:" << it << std::endl;
+          for(std::vector<type>::iterator iter = typeObjects.begin(); iter != typeObjects.end() ; iter++){
+               cluster* cur = (*iter).get_cluster();
+               std::cout << "type:" << (*iter).get_name() << " Deleted from:" << (*cur).get_id() << " ";
+               (*cur).del_type(*iter);
+               for(int i = 0 ; i < clusters.size(); i++){
+                    double pri = log_cluster_prior(clusters[i]);
+                    double pos = log_cluster_posterior(*iter, clusters[i]);
+                    //std::cout << i << " pri:" << std::exp(pri) << " pos:" << std::exp(pos) << std::endl;
+                    //std::cout << i << " pri:" << pri << " pos:" << pos << std::endl;
+                    probs[i] = log_sum(pri, pos);
+                    //                    probs[i] = pri * pos;
+               }
+               int ncid =  multi(probs);
+               std::cout << "Added to:" << ncid << std::endl;
+               clusters[ncid].add_type(*iter);
+          }
+     }
+}
+
+int learn::multi(std::vector<double>& probs)const {
+     double sum = 0,min = INT_MAX, r = rand()*1.0 / RAND_MAX;
+     int ret = -1;
+     for(int i = 0 ; i < probs.size();i++)
+          min = min < -probs[i] ? min : -probs[i];
+     //     std::cout << "min:" << min << std::endl;
+     for(int i = 0 ; i < probs.size();i++){
+          //          std::cout << probs[i] << " ";
+          probs[i] = std::exp(probs[i]+min);
+          //          std::cout << "[" <<probs[i] << "] ";
+          sum += probs[i];
+     }
+     //     std::cout << "random:" << r << " sum:" << sum << std::endl;
+     for(int i = 0 ; i < probs.size();i++){
+          probs[i] /= sum;
+          if (i > 0) probs[i] += probs[i-1];
+          std::cout << probs[i] << " ";
+          if(r < probs[i]) {ret = i; break;}
+     }     
+     std::cout << std::endl;
+     return ret;
+}
+
 void learn::info(){
-     // clusters[2].add_type(typeObjects[0]);
-     // clusters[2].info();
-     // std::exit(1);
-     for(int i = 0 ; i < typeObjects.size(); i++)
-          typeObjects[i].info();
+     for(int i = 0 ; i < clusters.size(); i++)
+          //          clusters[i].info();
+          clusters[i].type_info();
 }
 
 int main(int argc, char ** argv){
@@ -122,10 +244,12 @@ int main(int argc, char ** argv){
      data d;
      d.read(argv[1]);
      d.info();
-     learn l(d.get_rows());
+     learn l(d.get_rows(),45);
      l.preprocess_data();
      l.counts();
+     l.random_init();
+     //     l.info();
+     l.sample_type();
      l.info();
-     while(1);
      return 0;
 }
